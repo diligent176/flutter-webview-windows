@@ -215,6 +215,14 @@ WebviewBridge::~WebviewBridge() {
     method_channel_->SetMethodCallHandler(nullptr);
     texture_registrar_->UnregisterTexture(texture_id_);
   }
+  // Quiesce the capture thread before ~Webview closes the WebView2
+  // controller (member destruction runs webview_ before texture_bridge_,
+  // so without this the capture keeps pulling frames from a surface whose
+  // browser is mid-Close). Stop() joins the capture session under the
+  // bridge's own mutex; the frame callback is already engine-lock guarded.
+  if (texture_bridge_) {
+    texture_bridge_->Stop();
+  }
 }
 
 void WebviewBridge::RegisterEventHandlers() {
