@@ -73,4 +73,26 @@ inline bool EngineAvailable() {
   return available;
 }
 
+// Runs |fn| while the messenger lock guarantees the engine cannot be torn
+// down underneath it, or not at all if the engine is already gone. This is
+// the form for engine calls made OFF the platform thread (e.g. the texture
+// frame callback from the capture thread): the header contract is that
+// availability does not change while the lock is held, so the engine's
+// destructor blocks on SetEngine(nullptr) until |fn| returns. Runs |fn|
+// unguarded when no messenger was captured, preserving original behavior.
+template <typename F>
+inline void IfEngineAvailableLocked(F&& fn) {
+  FlutterDesktopMessengerRef messenger =
+      MessengerSlot().load(std::memory_order_acquire);
+  if (!messenger) {
+    fn();
+    return;
+  }
+  FlutterDesktopMessengerLock(messenger);
+  if (FlutterDesktopMessengerIsAvailable(messenger)) {
+    fn();
+  }
+  FlutterDesktopMessengerUnlock(messenger);
+}
+
 }  // namespace webview_windows
