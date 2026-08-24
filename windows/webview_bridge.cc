@@ -5,6 +5,7 @@
 
 #include <format>
 
+#include "engine_availability.h"
 #include "texture_bridge_gpu.h"
 
 namespace {
@@ -196,8 +197,19 @@ WebviewBridge::WebviewBridge(flutter::BinaryMessenger* messenger,
 }
 
 WebviewBridge::~WebviewBridge() {
-  method_channel_->SetMethodCallHandler(nullptr);
-  texture_registrar_->UnregisterTexture(texture_id_);
+  // During engine teardown these two calls dereference a messenger whose
+  // engine pointer is already null (flutter/flutter#118611): plugin
+  // destruction runs from FlutterWindowsEngine::Stop(), AFTER the engine's
+  // destructor cleared it. Skipping them then is safe - the dying engine is
+  // discarding every channel handler and texture anyway. On a mid-session
+  // dispose (the "dispose" method call) the engine is alive and both
+  // unregistrations run exactly as before. The WebView2 COM objects
+  // (webview_, texture_bridge_) are members, so they are released on BOTH
+  // paths and playback/audio stops with the bridge.
+  if (webview_windows::PluginAlive() && webview_windows::EngineAvailable()) {
+    method_channel_->SetMethodCallHandler(nullptr);
+    texture_registrar_->UnregisterTexture(texture_id_);
+  }
 }
 
 void WebviewBridge::RegisterEventHandlers() {
