@@ -90,6 +90,10 @@ class RoHelper {
   RoUninitialize_* mFpRoUninitialize;
 
   bool mWinRtAvailable;
+  // True only when this helper's own RoInitialize incremented the thread's
+  // apartment count, i.e. not for RPC_E_CHANGED_MODE. RoUninitialize is
+  // balanced against this, never against mWinRtAvailable.
+  bool mRoInitialized;
 
   HMODULE mComBaseModule;
   HMODULE mCoreMessagingModule;

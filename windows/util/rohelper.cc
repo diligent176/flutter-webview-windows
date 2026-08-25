@@ -57,6 +57,7 @@ RoHelper::RoHelper(RO_INIT_TYPE init_type)
       mFpRoInitialize(nullptr),
       mFpRoUninitialize(nullptr),
       mWinRtAvailable(false),
+      mRoInitialized(false),
       mComBaseModule(nullptr),
       mCoreMessagingModule(nullptr) {
 #ifdef WINUWP
@@ -118,27 +119,43 @@ RoHelper::RoHelper(RO_INIT_TYPE init_type)
 
   auto result = RoInitialize(init_type);
 
-  if (SUCCEEDED(result) || result == S_FALSE || result == RPC_E_CHANGED_MODE) {
+  if (SUCCEEDED(result) || result == RPC_E_CHANGED_MODE) {
     mWinRtAvailable = true;
   }
+  // RPC_E_CHANGED_MODE means the thread was already in a different apartment
+  // model and this call did NOT increment the apartment count - documented as
+  // "do not call CoUninitialize" (learn.microsoft.com,
+  // CoInitializeEx/RoInitialize). WinRT is still usable through the existing
+  // apartment, hence mWinRtAvailable above, but uninitializing would be an
+  // unbalanced release of somebody else's apartment reference. SUCCEEDED
+  // covers S_FALSE (already initialized, count incremented), which does have
+  // to be balanced.
+  mRoInitialized = SUCCEEDED(result);
 #endif
 }
 
 RoHelper::~RoHelper() {
 #ifndef WINUWP
-  if (mWinRtAvailable) {
+  if (mRoInitialized) {
     RoUninitialize();
   }
 
-  if (mCoreMessagingModule != nullptr) {
-    FreeLibrary(mCoreMessagingModule);
-    mCoreMessagingModule = nullptr;
-  }
-
-  if (mComBaseModule != nullptr) {
-    FreeLibrary(mComBaseModule);
-    mComBaseModule = nullptr;
-  }
+  // ComBase.dll and coremessaging.dll are deliberately NOT unloaded
+  // (BandBinder #2734). Both host state that outlives this helper by design:
+  // ComBase.dll is the COM/WinRT apartment the whole process runs in, and
+  // coremessaging.dll implements the DispatcherQueue this helper created for
+  // the CURRENT thread (WebviewPlatform, DQTYPE_THREAD_CURRENT) - a queue
+  // that stays attached to that thread, along with everything the WinRT
+  // compositor and WebView2's composition path hold against it.
+  //
+  // This destructor runs during Flutter engine teardown, on the platform
+  // thread, which then keeps pumping until WM_QUIT: an in-flight WebView2
+  // creation can still complete after it. Dropping our module references
+  // there is at best pointless (the process is about to end) and at worst
+  // unmaps the code and per-module state behind live objects, which is the
+  // classic way a shutdown turns into heap corruption rather than a clean
+  // access violation. Holding both references costs two mapped OS DLLs in a
+  // process that is exiting.
 #endif
 }
 

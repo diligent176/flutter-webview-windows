@@ -31,6 +31,31 @@ WebviewPlatform::WebviewPlatform()
   }
 }
 
+WebviewPlatform::~WebviewPlatform() {
+  // The dispatcher queue is deliberately abandoned rather than released
+  // (BandBinder #2734). It was created with DQTYPE_THREAD_CURRENT, so it
+  // belongs to the Flutter platform thread, not to this object: the WinRT
+  // compositor built on it and WebView2's composition path both hold work
+  // against it, and this destructor runs during engine teardown while that
+  // thread is still pumping (WM_DESTROY has posted WM_QUIT but has not
+  // dequeued it, so an in-flight WebView2 creation can still complete after
+  // this point). Dropping the controller there puts the queue into a
+  // half-owned state - alive on the thread, with nothing left holding the
+  // only handle that can shut it down - immediately before ~RoHelper does
+  // the rest of the WinRT teardown.
+  //
+  // ShutdownQueueAsync is not the answer either: it completes THROUGH the
+  // queue it is shutting down, so it needs the very message pump that is
+  // winding down. Blocking on it here risks hanging exit, and firing it and
+  // forgetting flushes nothing. The queue's real owner is the thread, the
+  // thread ends with the process, so the correct lifetime for the controller
+  // is "never released". This leaks one COM reference on a process that is
+  // exiting, and nothing about the plugin's live behavior changes: the queue
+  // already outlived this object (it was never shut down before either), so
+  // a second WebviewPlatform on the same thread sees exactly what it saw.
+  static_cast<void>(dispatcher_queue_controller_.detach());
+}
+
 bool WebviewPlatform::IsGraphicsCaptureSessionSupported() {
   HSTRING className;
   HSTRING_HEADER classNameHeader;

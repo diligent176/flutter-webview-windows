@@ -76,11 +76,24 @@ void WebviewHost::CreateWebview(HWND hwnd, bool offscreen_only,
         // recycled heap metadata, which surfaces as an intermittent
         // STATUS_HEAP_CORRUPTION (ntdll 0xc0000374) rather than a clean
         // access violation. Nothing has been attached to the controller at
-        // this point - no event handlers, no texture, no bridge - so dropping
-        // it is a complete teardown; releasing the com_ptr is the only thing
-        // this path owes anyone.
+        // this point - no event handlers, no texture, no bridge - so this
+        // path owes the app nothing but the one thing WebView2 asks of every
+        // controller's owner: Close() it (BandBinder #2734). The browser
+        // process has already bound this controller to `hwnd` and to a
+        // CoreWebView2 of its own, and dropping the last reference leaves
+        // that host to close implicitly, on WebView2's schedule instead of
+        // ours, on a thread one message away from WM_QUIT. ~Webview learned
+        // the same lesson the expensive way in #2681: an un-Closed controller
+        // whose browser host was still live during teardown produced this
+        // exact STATUS_HEAP_CORRUPTION signature.
         if (!webview_windows::PluginAlive() ||
             !webview_windows::EngineAvailable()) {
+          if (controller) {
+            if (auto webview_controller =
+                    controller.try_query<ICoreWebView2Controller>()) {
+              webview_controller->Close();
+            }
+          }
           return;
         }
         if (controller) {
