@@ -5,6 +5,7 @@
 #include <future>
 #include <iostream>
 
+#include "engine_availability.h"
 #include "util/rohelper.h"
 
 using namespace Microsoft::WRL;
@@ -62,6 +63,26 @@ void WebviewHost::CreateWebview(HWND hwnd, bool offscreen_only,
       hwnd, [=, self = this](
                 wil::com_ptr<ICoreWebView2CompositionController> controller,
                 std::unique_ptr<WebviewCreationError> error) {
+        // `self` is the plugin-owned WebviewHost, and this completion can
+        // arrive after the plugin is gone: the window was closed while
+        // WebView2 was still being created, so ~WebviewWindowsPlugin already
+        // freed the host AND the WebviewPlatform holding the compositor it
+        // hands out (BandBinder #2731). The plugin's own callback below
+        // guards its captured `this`, but that check runs one level too
+        // late - constructing Webview first reads `self->compositor()` out of
+        // the freed block (compositor_ is at offset 0, where the heap has
+        // already written its free-list bookkeeping), AddRefs whatever that
+        // yields and calls CreateContainerVisual through it: a write through
+        // recycled heap metadata, which surfaces as an intermittent
+        // STATUS_HEAP_CORRUPTION (ntdll 0xc0000374) rather than a clean
+        // access violation. Nothing has been attached to the controller at
+        // this point - no event handlers, no texture, no bridge - so dropping
+        // it is a complete teardown; releasing the com_ptr is the only thing
+        // this path owes anyone.
+        if (!webview_windows::PluginAlive() ||
+            !webview_windows::EngineAvailable()) {
+          return;
+        }
         if (controller) {
           std::unique_ptr<Webview> webview(new Webview(
               std::move(controller), self, hwnd, owns_window, offscreen_only));
