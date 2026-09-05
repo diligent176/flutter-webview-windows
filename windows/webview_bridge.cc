@@ -208,18 +208,54 @@ WebviewBridge::~WebviewBridge() {
   // destructor cleared it. Skipping them then is safe - the dying engine is
   // discarding every channel handler and texture anyway. On a mid-session
   // dispose (the "dispose" method call) the engine is alive and both
-  // unregistrations run exactly as before. The WebView2 COM objects
-  // (webview_, texture_bridge_) are members, so they are released on BOTH
-  // paths and playback/audio stops with the bridge.
+  // unregistrations run exactly as before. webview_ is a member, so the
+  // WebView2 controller is Close()d and released synchronously on BOTH paths
+  // and playback/audio stops with the bridge; the texture bridge is stopped
+  // on both paths too, but on the mid-session path it is handed to the
+  // unregistration callback rather than freed here (see below).
   if (webview_windows::PluginAlive() && webview_windows::EngineAvailable()) {
+    // Quiesce the capture FIRST, so that any populate the raster thread is
+    // already running returns nullptr against memory that is still alive,
+    // and so that ~Webview's Close() does not race a live capture session
+    // (BandBinder #2681). Stop() closes the session under the bridge's own
+    // mutex and removes the FrameArrived handler; both that handler and this
+    // destructor run on the platform thread, so no OnFrameArrived can begin
+    // after Stop() returns.
+    texture_bridge_->Stop();
+    // The frame-available callback captures `this`, and the bridge is about
+    // to outlive this object. Stop() already makes the callback unreachable;
+    // dropping it means there is no std::function left pointing at freed
+    // memory at all (BandBinder #3369).
+    texture_bridge_->SetOnFrameAvailable(nullptr);
+
     method_channel_->SetMethodCallHandler(nullptr);
-    texture_registrar_->UnregisterTexture(texture_id_);
+
+    // UnregisterTexture is ASYNCHRONOUS: it posts the texture-map erase to
+    // the raster thread and returns immediately, so freeing the bridge and
+    // the TextureVariant here left the engine's ExternalTextureD3d pointing
+    // at freed memory for one raster frame - with a video docked that is
+    // 30-60 chances a second for PopulateTexture to call
+    // TextureBridgeGpu::GetSurfaceDescriptor and write through a dead mutex
+    // (BandBinder #3369). The client wrapper marks the no-callback overload
+    // DEPRECATED for exactly this reason. Hand both objects to the
+    // completion callback instead: the engine runs it on the raster thread
+    // AFTER the erase, when no populate for this id can be in flight or ever
+    // start again, and runs it synchronously here if the raster post fails.
+    struct TextureOwner {
+      std::unique_ptr<TextureBridge> bridge;
+      std::unique_ptr<flutter::TextureVariant> texture;
+    };
+    auto owner = std::make_shared<TextureOwner>();
+    owner->bridge = std::move(texture_bridge_);
+    owner->texture = std::move(flutter_texture_);
+    texture_registrar_->UnregisterTexture(
+        texture_id_, [owner]() mutable { owner.reset(); });
   }
-  // Quiesce the capture thread before ~Webview closes the WebView2
-  // controller (member destruction runs webview_ before texture_bridge_,
-  // so without this the capture keeps pulling frames from a surface whose
-  // browser is mid-Close). Stop() joins the capture session under the
-  // bridge's own mutex; the frame callback is already engine-lock guarded.
+  // Engine-teardown path only (the branch above moved texture_bridge_ out):
+  // the engine is gone, nothing was unregistered, so just quiesce the
+  // capture thread before ~Webview closes the WebView2 controller - member
+  // destruction runs webview_ before texture_bridge_, so without this the
+  // capture keeps pulling frames from a surface whose browser is mid-Close.
   if (texture_bridge_) {
     texture_bridge_->Stop();
   }
